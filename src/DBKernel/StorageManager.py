@@ -1,0 +1,5 @@
+"""
+Storage Manager
+
+@author: FATESAIKOU
+"""

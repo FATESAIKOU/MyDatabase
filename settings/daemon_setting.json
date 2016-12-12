@@ -1,0 +1,8 @@
+{
+    "port": "12345",
+    "databases": {
+        "db1": "path/to/db1",
+        "db2": "path/to/db2",
+        "db3": "path/to/db3"
+    }
+}

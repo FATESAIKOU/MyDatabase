@@ -1,0 +1,5 @@
+"""
+QueryProcessor (Parser)
+
+@author: FATESAIKOU
+"""

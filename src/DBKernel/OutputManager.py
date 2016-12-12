@@ -1,0 +1,5 @@
+"""
+Output Manager
+
+@author: FATESAIKOU
+"""
