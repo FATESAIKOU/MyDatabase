@@ -1,5 +1,0 @@
-"""
-Utils
-
-@author: FATESAIKOU
-"""
