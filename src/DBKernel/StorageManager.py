@@ -72,12 +72,12 @@ class StorageManager:
 
         return False
    
-    def test(self):
-        return [
-            self.m_hashtable.read(8),
-            self.m_content_offset.read(self.m_content_offset.size()),
-            self.m_content.read(self.m_content.size())
-        ]
+    def getCounter(self):
+        return {
+            "hash_end": self.hash_end,
+            "record_num": self.record_num,
+            "content_end": self.content_end
+        }
 
     def put(self, record):
         search_result = self.__findRecord( record[self.key_col] )
