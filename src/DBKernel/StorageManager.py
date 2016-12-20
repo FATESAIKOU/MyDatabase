@@ -11,12 +11,13 @@ import struct
 import Utils
 
 class StorageManager:
-    def __init__(self, rdb_hashtable, rdb_content_offset, rdb_content, rdb_config, mode):
+    def __init__(self, rdb_hashtable, rdb_content_offset, rdb_content, rdb_config, rdb_counter, mode):
         # initialize file path
         self.hashtable_path = rdb_hashtable
         self.content_offset_path = rdb_content_offset
         self.content_path = rdb_content
         self.config_path = rdb_config
+        self.counter_path = rdb_counter
         self.mode = mode
 
     def __enter__(self):
@@ -30,6 +31,11 @@ class StorageManager:
         config = json.loads(config_src.read())
         config_src.close()
 
+        # load database counter
+        counter_src = open(self.counter_path, 'r')
+        counter = json.loads(counter_src.read())
+        counter_src.close()
+
         # mmap files
         self.m_hashtable = mmap.mmap(self.hashtable_src.fileno(), length=0, flags=mmap.MAP_SHARED)
         self.m_content_offset = mmap.mmap(self.content_offset_src.fileno(), length=0, flags=mmap.MAP_SHARED)
@@ -40,10 +46,13 @@ class StorageManager:
         self.key_col = config['key_col']
         self.key_col_index = [col['name'] for col in config['cols']].index(config['key_col'])
         self.hash_limit = config['hash_limit']
-        self.hashtable_width = 8
-        self.record_num = 1
-        self.record_offset_width = 4
-        self.content_end = 24
+        self.hashtable_width = config["hashtable_width"]
+        self.record_offset_width = config["record_offset_width"]
+
+        # database counter
+        self.hash_end = counter["hash_end"]
+        self.record_num = counter["record_num"]
+        self.content_end = counter["content_end"]
 
         return self
 
@@ -68,7 +77,7 @@ class StorageManager:
         ]
 
     def put(self, record):
-        search_result = self.__findRecord(record)
+        search_result = self.__findRecord( record[self.key_col] )
 
         if search_result["status"] == "not-found":
             # Create content in rdb_content, and get content_offset
@@ -82,7 +91,7 @@ class StorageManager:
 
             # Return hashtable_ele, rid, record, and status
             return {
-                "status": "success",
+                "status": "INFO: success",
                 "hash-entry": hash_creation_result["aim-entry"],
                 "record-id": record_creation_result["record-id"],
                 "content-offset": content_creation_result["record-content-offset"],
@@ -90,19 +99,58 @@ class StorageManager:
             }
             
         elif search_result["status"] == "found-parent":
-            print "There is a parent in it!"
+            # Create content in rdb_content, and get content_offset
+            content_creation_result = self.__createContent(record)
+
+            # Create record_mete in rdb_content_offset, and get rid
+            record_creation_result = self.__createRecord(content_creation_result["record-content-offset"])
+
+            # Create record_hash in rdb_hashtable at entry result["new-hashtable-entry"], and Linking it to the old record.
+            hash_creation_result = self.__linkHash(record_creation_result["record-id"], search_result["parent-hashtable-entry"])
+
+            # Return hashtable_ele, rid, record, and status
+            return {
+                "status": "INFO: do linking",
+                "hash-entry": hash_creation_result["aim-entry"],
+                "record-id": record_creation_result["record-id"],
+                "content-offset": content_creation_result["record-content-offset"],
+                "content-data": content_creation_result["record-content"]
+            }
         else:
             return { "status": "FAIL: key-exist" }
         
-    def get():
-        print "get"
+    def getByKey(self, key_val):
+        search_result = self.__findRecord(key_val)
+        
+        if search_result["status"] == "found":
+            return {
+                "status": "INFO: record-found",
+                "record": search_result["record-data"]
+            }
+        else:
+            return {
+                "status": "INFO: record-not-found",
+            }
+
+    def getByRid(self, rid):
+        if self.record_num - 1 < rid:
+            return { "status": "INFO: record-not-found" }
+        
+        record = self.__getRecord(rid)
+
+        if record["is-deleted"] == False:
+            return {
+                "status": "INFO: record-found",
+                "record": record
+            }
+        else:
+            return { "status": "INFO: record-not-found2" }
 
     def delete():
         print "delete"
 
-    def __findRecord(self, record):
+    def __findRecord(self, key_val):
         # get hash value
-        key_val = record[self.key_col]
         hash_val = Utils.hash33(key_val, 0, self.hash_limit)
 
         # start triversal
@@ -143,7 +191,13 @@ class StorageManager:
     def __getRecord(self, rid):
         content_offset = struct.unpack("i", self.m_content_offset[rid * 4:rid * 4 + 4])[0]
         
-        record_data = {}
+        if content_offset < 0:
+            content_offset = (content_offset + 1) * -1
+            is_deleted = True
+        else:
+            is_deleted = False
+        
+        record_data = { "is-deleted": is_deleted }
         cur_offset = content_offset
         for col in self.cols:
             # Get data size
@@ -161,7 +215,17 @@ class StorageManager:
         return record_data
 
     def __linkHash(self, rid, parent_entry):
-        print "To Link Hashtable Elements."
+        # If size too small mmaping it, expand
+        if self.m_hashtable.size() < (self.hash_end * 8) + 8:
+            self.m_hashtable.resize( self.m_hashtable.size() + 1024 )
+
+        # Create Hash Record
+        hash_creation_result = self.__createHash(rid, self.hash_end)
+
+        # Update hashcounter
+        self.hash_end = self.hash_end + 8
+
+        return hash_creation_result
 
     def __createHash(self, rid, aim_entry):
         # Check size at linkHash!!
@@ -186,7 +250,7 @@ class StorageManager:
         record_offset = rid * self.record_offset_width
 
         # If size too small mmapping it, expand.
-        if self.m_content_offset.size() <= record_offset:
+        if self.m_content_offset.size() < record_offset + 4:
             self.m_content_offset.resize( self.m_content_offset.size() + 1024 )
 
         # Encode data & Write
