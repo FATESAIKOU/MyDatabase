@@ -57,6 +57,9 @@ class StorageManager:
         return self
 
     def __exit__(self, type, msg, traceback):
+        # commit all data
+        self.commitData()
+
         # close mmaped files
         self.m_hashtable.close()
         self.m_content_offset.close()
@@ -138,16 +141,55 @@ class StorageManager:
         
         record = self.__getRecord(rid)
 
-        if record["is-deleted"] == False:
+        if record != None:
             return {
                 "status": "INFO: record-found",
                 "record": record
             }
         else:
-            return { "status": "INFO: record-not-found2" }
+            return { "status": "INFO: record-not-found" }
 
-    def delete():
-        print "delete"
+    def deleteByKey(self, key_val):
+        search_result = self.__findRecord(key_val)
+        
+        if search_result["status"] == "found":
+            # Delete hashtable record
+            aim_entry = search_result["hashtable-entry"]
+            (rid, next) = search_result["hashtable-content"]
+            aim_hashtable_offset = aim_entry * self.hashtable_width
+            self.m_hashtable[aim_hashtable_offset:aim_hashtable_offset + 8] = struct.pack("ii", (rid + 2) * -1, next)
+
+            # Delete record offset
+            content_offset = struct.unpack("i", self.m_content_offset[rid * 4:rid * 4 + 4])[0]
+            aim_record_offset = rid * 4
+            self.m_content_offset[aim_record_offset:aim_record_offset + 4] = struct.pack("i", (content_offset + 2) * -1)
+
+            return { "status": "INFO: record-deletion-success" }
+        else:
+            return { "status": "INFO: record-not-found" }
+
+    def deleteByRid(self, rid):
+        record_content = self.__getRecord(rid)
+
+        if record_content != None:
+            return self.deleteByKey( record_content[self.key_col] )
+        else:
+            return { "status": "INFO: record-not-found" }
+
+    def commitData(self):
+        # Update counters
+        counter_src = open(self.counter_path, 'w')
+        counter_src.write(json.dumps({
+            "hash_end": self.hash_end,
+            "record_num": self.record_num,
+            "content_end": self.content_end
+        }))
+        counter_src.close()
+
+        # flush datas
+        self.m_content.flush()
+        self.m_content_offset.flush()
+        self.m_hashtable.flush()
 
     def __findRecord(self, key_val):
         # get hash value
@@ -189,15 +231,14 @@ class StorageManager:
                 }
 
     def __getRecord(self, rid):
-        content_offset = struct.unpack("i", self.m_content_offset[rid * 4:rid * 4 + 4])[0]
-        
+        record_offset = rid * self.record_offset_width
+        content_offset = struct.unpack("i", self.m_content_offset[record_offset:record_offset + 4])[0]
+       
+        record_data = {}
+
         if content_offset < 0:
-            content_offset = (content_offset + 1) * -1
-            is_deleted = True
-        else:
-            is_deleted = False
+            return None
         
-        record_data = { "is-deleted": is_deleted }
         cur_offset = content_offset
         for col in self.cols:
             # Get data size
@@ -261,7 +302,6 @@ class StorageManager:
             "content-offset": content_offset
         }
 
-
     def __createContent(self, record):
         # Encode data
         write_content = ''.join([Utils.packData(record[ col["name"] ]) for col in self.cols])
@@ -279,8 +319,3 @@ class StorageManager:
             "record-content-offset": record_offset,
             "record-content": record
         }
-
-    def __commitData(self):
-        self.m_content.flush()
-        self.m_content_offset.flush()
-        self.m_hashtable.flush()
