@@ -41,6 +41,9 @@ class StorageManager:
         self.key_col_index = [col['name'] for col in config['cols']].index(config['key_col'])
         self.hash_limit = config['hash_limit']
         self.hashtable_width = 8
+        self.record_num = 1
+        self.record_offset_width = 4
+        self.content_end = 24
 
         return self
 
@@ -65,16 +68,32 @@ class StorageManager:
         ]
 
     def put(self, record):
-        result = self.__findRecord(record)
+        search_result = self.__findRecord(record)
 
-        if result["status"] == "not-found":
-            print "There is a space!!"
-        elif result["status"] == "found-parent":
+        if search_result["status"] == "not-found":
+            # Create content in rdb_content, and get content_offset
+            content_creation_result = self.__createContent(record)
+
+            # Create record_mete in rdb_content_offset, and get rid
+            record_creation_result = self.__createRecord(content_creation_result["record-content-offset"])
+
+            # Create record_hash in rdb_hashtable at entry result["new-hashtable-entry"]
+            hash_creation_result = self.__createHash(record_creation_result["record-id"], search_result["new-hashtable-entry"])
+
+            # Return hashtable_ele, rid, record, and status
+            return {
+                "status": "success",
+                "hash-entry": hash_creation_result["aim-entry"],
+                "record-id": record_creation_result["record-id"],
+                "content-offset": content_creation_result["record-content-offset"],
+                "content-data": content_creation_result["record-content"]
+            }
+            
+        elif search_result["status"] == "found-parent":
             print "There is a parent in it!"
         else:
-            print "Record Already Exist!"
-
-
+            return { "status": "FAIL: key-exist" }
+        
     def get():
         print "get"
 
@@ -107,6 +126,7 @@ class StorageManager:
                 return {
                     "status": "found",
                     "hashtable-entry": now_entry,
+                    "hashtable-content": (rid, next),
                     "record-data": record_data
                 }
             # If key_val is not equal, but it have the next, GO FOR IT.
@@ -116,11 +136,12 @@ class StorageManager:
             else:
                 return {
                     "status": "found-parent",
-                    "parent-hashtable-entry": now_entry
+                    "parent-hashtable-entry": now_entry,
+                    "parent-hashtable-content": (rid, next)
                 }
 
     def __getRecord(self, rid):
-        content_offset = self.m_content_offset[rid * 4:rid * 4 + 4]
+        content_offset = struct.unpack("i", self.m_content_offset[rid * 4:rid * 4 + 4])[0]
         
         record_data = {}
         cur_offset = content_offset
@@ -130,7 +151,72 @@ class StorageManager:
             cur_offset = cur_offset + 4
 
             # Get data
-            record_data[ col["name"] ] = struct.unpack(col["type"][0], self.m_content[cur_offset:cur_offset + data_size])[0]
+            if col["type"] == 'int':
+                record_data[ col["name"] ] = struct.unpack("i", self.m_content[cur_offset:cur_offset + data_size])[0]
+            elif col["type"] == 'string':
+                record_data[ col["name"] ] = struct.unpack("%ds" % data_size, self.m_content[cur_offset:cur_offset + data_size])[0]
+
             cur_offset = cur_offset + data_size
 
         return record_data
+
+    def __linkHash(self, rid, parent_entry):
+        print "To Link Hashtable Elements."
+
+    def __createHash(self, rid, aim_entry):
+        # Check size at linkHash!!
+
+        # Some needed variables
+        hash_offset = aim_entry * self.hashtable_width
+        
+        # Encode & Write
+        self.m_hashtable[hash_offset:hash_offset + self.hashtable_width] = struct.pack("ii", rid, -1)
+
+        return {
+            "record-id": rid,
+            "aim-entry": aim_entry
+        }
+
+        print "To Insert the (rid, -1) to the aim entry in hashtable."
+
+    def __createRecord(self, content_offset):
+        # Some needed variables
+        rid = self.record_num
+        self.record_num = self.record_num + 1
+        record_offset = rid * self.record_offset_width
+
+        # If size too small mmapping it, expand.
+        if self.m_content_offset.size() <= record_offset:
+            self.m_content_offset.resize( self.m_content_offset.size() + 1024 )
+
+        # Encode data & Write
+        self.m_content_offset[record_offset:record_offset + self.record_offset_width] = struct.pack("i", content_offset)
+
+        return {
+            "record-id": rid,
+            "content-offset": content_offset
+        }
+
+
+    def __createContent(self, record):
+        # Encode data
+        write_content = ''.join([Utils.packData(record[ col["name"] ]) for col in self.cols])
+        
+        # If size too small mmapping it, expand.
+        if self.m_content.size() < self.content_end + len(write_content):
+            self.m_content.resize( self.m_content.size() + max(len(write_content), 10240) )
+
+        # Write data into it 
+        record_offset = self.content_end
+        self.m_content[self.content_end:self.content_end + len(write_content)] = write_content
+        self.content_end = self.content_end + len(write_content)
+        
+        return {
+            "record-content-offset": record_offset,
+            "record-content": record
+        }
+
+    def __commitData(self):
+        self.m_content.flush()
+        self.m_content_offset.flush()
+        self.m_hashtable.flush()
